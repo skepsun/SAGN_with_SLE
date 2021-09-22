@@ -33,8 +33,6 @@ class ACCEvaluator(object):
 
         return accuracy_score(y_true.cpu(), y_pred.cpu())
 
-
-
 class F1Evaluator(object):
 
     def __init__(self, average='micro'):
@@ -44,57 +42,6 @@ class F1Evaluator(object):
     def __call__(self, y_pred, y_true):
 
         return f1_score(y_true.cpu(), y_pred.cpu(), average=self.average)
-    
-
-def convert_mag_to_homograph(g, device, use_emb=True):
-    """
-    Featurize node types that don't have input features (i.e. author,
-    institution, field_of_study) by averaging their neighbor features.
-    Then convert the graph to a undirected homogeneous graph.
-    """
-    path = "../NARS/TransE_mag"
-    
-    if use_emb:
-        author_emb = torch.load(os.path.join(path, "author.pt")).float()
-        topic_emb = torch.load(os.path.join(path, "field_of_study.pt")).float()
-        institution_emb = torch.load(os.path.join(path, "institution.pt")).float()
-        g.nodes["author"].data["feat"] = author_emb.to(device)
-        g.nodes["institution"].data["feat"] = institution_emb.to(device)
-        g.nodes["field_of_study"].data["feat"] = topic_emb.to(device)
-        paper_dim = g.nodes["paper"].data["feat"].shape[1]
-        author_dim = g.nodes["author"].data["feat"].shape[1]
-        if paper_dim != author_dim:
-            paper_feat = g.nodes["paper"].data.pop("feat")
-            rand_weight = torch.Tensor(paper_dim, author_dim).uniform_(-0.5, 0.5)
-            g.nodes["paper"].data["feat"] = torch.matmul(paper_feat, rand_weight.to(device))
-            print(f"Randomly project paper feature from dimension {paper_dim} to {author_dim}")
-
-    else:
-        src_writes, dst_writes = g.all_edges(etype="writes")
-        src_topic, dst_topic = g.all_edges(etype="has_topic")
-        src_aff, dst_aff = g.all_edges(etype="affiliated_with")
-        new_g = dgl.heterograph({
-            ("paper", "written", "author"): (dst_writes, src_writes),
-            ("paper", "has_topic", "field"): (src_topic, dst_topic),
-            ("author", "aff", "inst"): (src_aff, dst_aff)
-        })
-        new_g = new_g.to(device)
-        new_g.nodes["paper"].data["feat"] = g.nodes["paper"].data["feat"]   
-        new_g["written"].update_all(fn.copy_u("feat", "m"), fn.mean("m", "feat"))
-        new_g["has_topic"].update_all(fn.copy_u("feat", "m"), fn.mean("m", "feat"))
-        new_g["aff"].update_all(fn.copy_u("feat", "m"), fn.mean("m", "feat"))
-        g.nodes["author"].data["feat"] = new_g.nodes["author"].data["feat"]
-        g.nodes["institution"].data["feat"] = new_g.nodes["inst"].data["feat"]
-        g.nodes["field_of_study"].data["feat"] = new_g.nodes["field"].data["feat"]
-
-    # Convert to homogeneous graph
-    # Get DGL type id for paper type
-    target_type_id = g.get_ntype_id("paper")
-    g = dgl.to_homogeneous(g, ndata=["feat"])
-    g = dgl.add_reverse_edges(g, copy_ndata=True)
-    # Mask for paper nodes
-    g.ndata["target_mask"] = g.ndata[dgl.NTYPE] == target_type_id
-    return g
 
 def get_evaluator(name):
     if name in ["cora"]:
@@ -105,36 +52,36 @@ def get_evaluator(name):
         evaluator = get_ogb_evaluator(name)
     return evaluator
 
-def load_dataset(name, root, device, mag_emb=False):
+def load_dataset(device, args):
     """
     Load dataset and move graph and features to device
     """
-    if name in ["reddit", "cora", "ppi", "ppi_large", "yelp", "flickr"]:
+    if args.dataset in ["reddit", "cora", "ppi", "ppi_large", "yelp", "flickr"]:
         # raise RuntimeError("Dataset {} is not supported".format(name))
-        if name == "reddit":
+        if args.dataset == "reddit":
             from dgl.data import RedditDataset
             data = RedditDataset(self_loop=True)
             g = data[0]
             g = dgl.add_self_loop(g)
             n_classes = data.num_classes
-        elif name == "cora":
+        elif args.dataset == "cora":
             from dgl.data import CitationGraphDataset
-            data = CitationGraphDataset('cora', raw_dir=os.path.join(root, name))
+            data = CitationGraphDataset('cora', raw_dir=os.path.join(args.data_dir, 'cora'))
             g = data[0]
             g = dgl.remove_self_loop(g)
             g = dgl.add_self_loop(g)
             n_classes = data.num_classes
-        elif name == "ppi":
-            data = load_ppi_data()
+        elif args.dataset == "ppi":
+            data = load_ppi_data(args.data_dir)
             g = data.g
             n_classes = data.num_classes
-        elif name == "ppi_large":
+        elif args.dataset == "ppi_large":
             data = load_ppi_large_data()
             g = data.g
             n_classes = data.num_classes
-        elif name == "yelp":
+        elif args.dataset == "yelp":
             from torch_geometric.datasets import Yelp
-            pyg_data = Yelp(os.path.join(root, name))[0]
+            pyg_data = Yelp(os.path.join(args.data_dir, 'yelp'))[0]
             feat = pyg_data.x
             labels = pyg_data.y
             u, v = pyg_data.edge_index
@@ -145,9 +92,9 @@ def load_dataset(name, root, device, mag_emb=False):
             g.ndata['val_mask'] = pyg_data.val_mask
             g.ndata['test_mask'] = pyg_data.test_mask
             n_classes = labels.size(1)
-        elif name == "flickr":
+        elif args.dataset == "flickr":
             from torch_geometric.datasets import Flickr
-            pyg_data = Flickr(os.path.join(root, name))[0]
+            pyg_data = Flickr(os.path.join(args.data_dir, "flickr"))[0]
             feat = pyg_data.x
             labels = pyg_data.y
             # labels = torch.argmax(labels, dim=1)
@@ -170,7 +117,7 @@ def load_dataset(name, root, device, mag_emb=False):
         labels = g.ndata['label']
 
     else:
-        dataset = DglNodePropPredDataset(name=name, root=root)
+        dataset = DglNodePropPredDataset(name=args.dataset, root=args.data_dir)
         splitted_idx = dataset.get_idx_split()
         train_nid = splitted_idx["train"]
         val_nid = splitted_idx["valid"]
@@ -179,31 +126,50 @@ def load_dataset(name, root, device, mag_emb=False):
         n_classes = dataset.num_classes
         g = g.to(device)
 
-        if name == "ogbn-arxiv":
+        if args.dataset == "ogbn-arxiv":
             g = dgl.add_reverse_edges(g, copy_ndata=True)
             g = dgl.add_self_loop(g)
             g.ndata['feat'] = g.ndata['feat'].float()
 
-        elif name == "ogbn-papers100M":
+        elif args.dataset == "ogbn-papers100M":
             g = dgl.add_reverse_edges(g, copy_ndata=True)
             g.ndata['feat'] = g.ndata['feat'].float()
             labels = labels.long()
 
-        elif name == "ogbn-mag":
+        elif args.dataset == "ogbn-mag":
             # MAG is a heterogeneous graph. The task is to make prediction for
             # paper nodes
+            path = os.path.join(args.emb_path, f"{args.pretrain_model}_mag")
             labels = labels["paper"]
             train_nid = train_nid["paper"]
             val_nid = val_nid["paper"]
             test_nid = test_nid["paper"]
-            g = convert_mag_to_homograph(g, device, use_emb=mag_emb)
+            features = g.nodes['paper'].data['feat']
+            author_emb = torch.load(os.path.join(path, "author.pt"), map_location=torch.device("cpu")).float()
+            topic_emb = torch.load(os.path.join(path, "field_of_study.pt"), map_location=torch.device("cpu")).float()
+            institution_emb = torch.load(os.path.join(path, "institution.pt"), map_location=torch.device("cpu")).float()
+
+            g.nodes["author"].data["feat"] = author_emb.to(device)
+            g.nodes["institution"].data["feat"] = institution_emb.to(device)
+            g.nodes["field_of_study"].data["feat"] = topic_emb.to(device)
+            g.nodes["paper"].data["feat"] = features.to(device)
+            paper_dim = g.nodes["paper"].data["feat"].shape[1]
+            author_dim = g.nodes["author"].data["feat"].shape[1]
+            if paper_dim != author_dim:
+                paper_feat = g.nodes["paper"].data.pop("feat")
+                rand_weight = torch.Tensor(paper_dim, author_dim).uniform_(-0.5, 0.5)
+                g.nodes["paper"].data["feat"] = torch.matmul(paper_feat, rand_weight.to(device))
+                print(f"Randomly project paper feature from dimension {paper_dim} to {author_dim}")
+
+            labels = labels.to(device).squeeze()
+            n_classes = int(labels.max() - labels.min()) + 1
         
         else:
             g.ndata['feat'] = g.ndata['feat'].float()
 
         labels = labels.squeeze()
 
-    evaluator = get_evaluator(name)
+    evaluator = get_evaluator(args.dataset)
 
     print(f"# Nodes: {g.number_of_nodes()}\n"
           f"# Edges: {g.number_of_edges()}\n"
@@ -214,13 +180,12 @@ def load_dataset(name, root, device, mag_emb=False):
 
     return g, labels, n_classes, train_nid, val_nid, test_nid, evaluator
 
-def load_ppi_data():
+def load_ppi_data(root):
     DataType = namedtuple('Dataset', ['num_classes', 'g'])
-    dataset_str = "../../dataset/ppi/"
-    adj_full = sp.load_npz(dataset_str+'adj_full.npz')
+    adj_full = sp.load_npz(os.path.join(root, 'ppi', 'adj_full.npz'))
     G = dgl.from_scipy(adj_full)
     nodes_num = G.num_nodes()
-    role = json.load(open(dataset_str+'role.json','r'))
+    role = json.load(open(os.path.join(root, 'ppi','role.json'),'r'))
     tr = list(role['tr'])
     te = list(role['te'])
     va = list(role['va'])
@@ -236,10 +201,10 @@ def load_ppi_data():
     G.ndata['val_mask'] = torch.tensor(val_mask, dtype=torch.bool)
     G.ndata['test_mask'] = torch.tensor(test_mask, dtype=torch.bool)
 
-    feats=np.load(dataset_str+'feats.npy')
+    feats=np.load(os.path.join(root, 'ppi', 'feats.npy'))
     G.ndata['feat'] = torch.tensor(feats, dtype=torch.float)
 
-    class_map = json.load(open(dataset_str+'class_map.json', 'r'))
+    class_map = json.load(open(os.path.join(root, 'ppi', 'class_map.json'), 'r'))
     labels = np.array([class_map[str(i)] for i in range(nodes_num)])
     G.ndata['label'] = torch.tensor(labels, dtype=torch.float)
     data = DataType(g=G, num_classes=labels.shape[1])

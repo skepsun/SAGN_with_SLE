@@ -11,15 +11,19 @@ python -u ../../src/sagn.py \
     --aggr-gpu $gpu \
     --model sagn \
     --inductive \
-    --threshold 0.9 \
-    --epoch-setting 500 500 500 \
-    --lr 0.0001 \
-    --batch-size 1000 \
+    --zero-inits \
+    --threshold 0.9 0.9 \
+    --eval-every 10 \
+    --epoch-setting 1000 1000 1000 \
+    --lr 0.001 \
+    --batch-size 10000 \
     --num-hidden 512 \
+    --num-heads 1 \
     --dropout 0.7 \
-    --attn-drop 0.0 \
+    --attn-drop 0.4 \
     --input-drop 0.0 \
-    --K 2 \
+    --label-drop 0.7 \
+    --K 3 \
     --use-labels \
     --label-K 4 \
     --weight-decay 0 \

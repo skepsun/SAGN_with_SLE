@@ -12,16 +12,18 @@ python -u ../../src/sagn.py \
     --model sagn \
     --seed 0 \
     --num-runs 10 \
-    --threshold 0.9 \
-    --epoch-setting 1000 200 200 \
+    --threshold 0.95 \
+    --epoch-setting 1000 500 500 \
     --lr 0.001 \
     --batch-size 50000 \
     --num-hidden 512 \
+    --num-heads 1 \
     --dropout 0.5 \
     --attn-drop 0.4 \
     --input-drop 0.2 \
-    --K 5 \
-    --label-K 9 \
+    --label-drop 0.5 \
+    --K 3 \
+    --label-K 14 \
     --use-labels \
     --weight-decay 0 \
     --warmup-stage -1

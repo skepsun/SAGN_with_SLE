@@ -15,39 +15,58 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from dataset import load_dataset
 from gen_models import get_model
 from pre_process import prepare_data
 from train_process import test, train
-from utils import get_n_params, seed
+from utils import read_subset_list, generate_subset_list, get_n_params, seed
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 
-def run(args, data, device, stage=0):
+def run(args, data, device, stage=0, subset_list=None):
     feats, label_emb, teacher_probs, labels, labels_with_pseudos, in_feats, n_classes, \
         train_nid, train_nid_with_pseudos, val_nid, test_nid, evaluator, _ = data
+    if args.dataset == "ogbn-papers100M":
+        # We only store test/val/test nodes' features for ogbn-papers100M
+        labels = labels[torch.cat([train_nid, val_nid, test_nid], dim=0)]
+        labels_with_pseudos = labels_with_pseudos[torch.cat([train_nid, val_nid, test_nid], dim=0)]
+        id_map = dict(zip(torch.cat([train_nid, val_nid, test_nid], dim=0).cpu().long().numpy(), np.arange(len(train_nid) + len(val_nid) + len(test_nid))))
+        map_func = lambda x: torch.from_numpy(np.array([id_map[a] for a in x.cpu().numpy()])).to(device)
+        train_nid = map_func(train_nid)
+        val_nid = map_func(val_nid)
+        test_nid = map_func(test_nid)
+        train_nid_with_pseudos = map_func(train_nid_with_pseudos)
+    # Raw training set loader
     train_loader = torch.utils.data.DataLoader(
         train_nid, batch_size=args.batch_size, shuffle=True, drop_last=False)
+    # Enhanced training set loader (but equal to raw one if stage == 0)
     train_loader_with_pseudos = torch.utils.data.DataLoader(
         train_nid_with_pseudos, batch_size=args.batch_size, shuffle=True, drop_last=False)
+    # Validation set loader
     val_loader = torch.utils.data.DataLoader(
         val_nid, batch_size=args.eval_batch_size,
         shuffle=False, drop_last=False)
+    # Test set loader
     test_loader = torch.utils.data.DataLoader(
         torch.cat([train_nid, val_nid, test_nid], dim=0), batch_size=args.eval_batch_size,
         shuffle=False, drop_last=False)
+    # All nodes loader (including nodes without labels)
     all_loader = torch.utils.data.DataLoader(
         torch.arange(len(labels)), batch_size=args.eval_batch_size,
         shuffle=False, drop_last=False)
+
     # Initialize model and optimizer for each run
-    
-    model = get_model(in_feats, n_classes, stage, args)
+    label_in_feats = label_emb.shape[1] if label_emb is not None else n_classes
+    model = get_model(in_feats, label_in_feats, n_classes, stage, args, subset_list=subset_list)
     model = model.to(device)
     print("# Params:", get_n_params(model))
     
     if args.dataset in ["ppi", "ppi_large", "yelp"]:
+        # For multilabel classification
         loss_fcn = nn.BCEWithLogitsLoss()
     else:
+        # For multiclass classification
         loss_fcn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                     weight_decay=args.weight_decay)
@@ -66,15 +85,16 @@ def run(args, data, device, stage=0):
 
     for epoch in range(1, num_epochs + 1):
         start = time.time()
-        train(model, feats, label_emb, teacher_probs, labels_with_pseudos, loss_fcn, optimizer, train_loader_with_pseudos, )
+        train(model, feats, label_emb, teacher_probs, labels_with_pseudos, loss_fcn, optimizer, train_loader_with_pseudos, args)
         med = time.time()
 
         if epoch % args.eval_every == 0:
             with torch.no_grad():
                 acc = test(model, feats, label_emb, teacher_probs, labels, loss_fcn, val_loader, test_loader, evaluator,
-                           train_nid, val_nid, test_nid)
+                           train_nid, val_nid, test_nid, args)
             end = time.time()
 
+            # We can choose val_acc or val_loss to select best model (usually it does not matter)
             if (acc[1] > best_val and args.acc_loss == "acc") or (acc[3] < best_val_loss and args.acc_loss == "loss"):
                 best_epoch = epoch
                 best_val = acc[1]
@@ -95,17 +115,20 @@ def run(args, data, device, stage=0):
     with torch.no_grad():
         best_model.eval()
         probs = []
-        if args.model in ["sagn"] and (not args.avoid_features):
+        if (args.model in ["sagn", "plain_sagn"] and args.weight_style=="attention") and (not args.avoid_features):
             attn_weights = []
         else:
             attn_weights = None
         for batch in test_loader:
-            batch_feats = [x[batch].to(device) for x in feats] if isinstance(feats, list) else feats[batch].to(device)
+            if args.dataset == "ogbn-mag":
+                batch_feats = {rel_subset: [x[batch].to(device) for x in feat] for rel_subset, feat in feats.items()}
+            else:
+                batch_feats = [x[batch].to(device) for x in feats] if isinstance(feats, list) else feats[batch].to(device)
             if label_emb is not None:
                 batch_label_emb = label_emb[batch].to(device)
             else:
                 batch_label_emb = None
-            if args.model in ["sagn", "plain_sagn"]:
+            if (args.model in ["sagn", "plain_sagn"]) and (not args.avoid_features):
                 out, a = best_model(batch_feats, batch_label_emb)
             else:
                 out = best_model(batch_feats, batch_label_emb)
@@ -115,10 +138,10 @@ def run(args, data, device, stage=0):
                 out = out.softmax(dim=1)
             # remember to transfer output probabilities to cpu
             probs.append(out.cpu())
-            if args.model in ["sagn"] and (not args.avoid_features):
+            if (args.model in ["sagn", "plain_sagn"] and args.weight_style=="attention") and (not args.avoid_features):
                 attn_weights.append(a.cpu().squeeze(1).squeeze(1))
         probs = torch.cat(probs, dim=0)
-        if args.model in ["sagn"] and (not args.avoid_features):
+        if (args.model in ["sagn", "plain_sagn"] and args.weight_style=="attention") and (not args.avoid_features):
             attn_weights = torch.cat(attn_weights)
         
     del model, best_model
@@ -129,10 +152,8 @@ def run(args, data, device, stage=0):
 
 
 def main(args):
-    if args.gpu < 0:
-        device = "cpu"
-    else:
-        device = "cuda:{}".format(args.gpu)
+    device = torch.device("cpu" if args.gpu < 0 else "cuda:{}".format(args.gpu))
+    aggr_device = torch.device("cpu" if args.aggr_gpu < 0 else f"cuda:{args.aggr_gpu}")
     
     # initial_emb_path = os.path.join("..", "embeddings", args.dataset, 
                             # args.model if (args.model != "simple_sagn") else (args.model + "_" + args.weight_style),
@@ -151,6 +172,15 @@ def main(args):
         print(f"Run {i} start training")
         seed(seed=args.seed + i)
         
+        if args.dataset == "ogbn-mag":
+            if args.fixed_subsets:
+                subset_list = read_subset_list(args.dataset, args.example_subsets_path)
+            else:
+                g, _, _, _, _, _, _ = load_dataset(aggr_device, args)
+                subset_list = generate_subset_list(g, args.sample_size)
+        else:
+            subset_list = None
+
         best_val_accs = []
         best_test_accs = []
         val_accs = []
@@ -164,31 +194,35 @@ def main(args):
             
             if args.warmup_stage > -1:
                 if stage <= args.warmup_stage:
-                    probs_path = os.path.join(args.probs_dir, args.dataset, args.model if (args.model != "simple_sagn") else (args.model + "_" + args.weight_style),
-                                    f'use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_probs_seed_{args.seed + i}_stage_{stage}.pt')
+                    probs_path = os.path.join(args.probs_dir, 
+                                              args.dataset, 
+                                              args.model if (args.weight_style == "attention") else (args.model + "_" + args.weight_style),
+                                              f'use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_probs_seed_{args.seed + i}_stage_{stage}.pt')
+                    print(probs_path)
                     if os.path.exists(probs_path):
-                        print(f"bypass stage {stage} since warmup_stage is setted and associated file exists.")
+                        print(f"bypass stage {stage} since warmup_stage is set and associated file exists.")
                         continue
             print("-" * 100)
             print(f"Stage {stage} start training")
             if stage > 0:
                 probs_path = os.path.join(args.probs_dir, args.dataset, 
-                                args.model if (args.model != "simple_sagn") else (args.model + "_" + args.weight_style),
-                                f'use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_probs_seed_{args.seed + i}_stage_{stage - 1}.pt')
+                                args.model if (args.weight_style == "attention") else (args.model + "_" + args.weight_style),
+                                f'use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_probs_seed_{args.seed + i}_stage_{stage - 1}.pt')
             else:
                 probs_path = ''
+
             with torch.no_grad():
-                data = prepare_data(device, args, probs_path, stage, load_embs=args.load_embs, load_label_emb=args.load_label_emb)
+                data = prepare_data(device, args, probs_path, stage, load_embs=args.load_embs, load_label_emb=args.load_label_emb, subset_list=subset_list)
             preprocessing_times.append(data[-1])
             print(f"Preprocessing costs {(data[-1]):.4f} s")
-            best_val, best_test, probs, train_time, inference_time, val_acc, val_loss, attn_weights = run(args, data, device, stage)
+            best_val, best_test, probs, train_time, inference_time, val_acc, val_loss, attn_weights = run(args, data, device, stage, subset_list=subset_list)
             train_times.append(train_time)
             inference_times.append(inference_time)
             val_accs.append(val_acc)
             val_losses.append(val_loss)
             new_probs_path = os.path.join(args.probs_dir, args.dataset, 
-                                args.model if (args.model != "simple_sagn") else (args.model + "_" + args.weight_style),
-                                f'use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_probs_seed_{args.seed + i}_stage_{stage}.pt')
+                                args.model if (args.weight_style == "attention") else (args.model + "_" + args.weight_style),
+                                f'use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_probs_seed_{args.seed + i}_stage_{stage}.pt')
             if not os.path.exists(os.path.dirname(new_probs_path)):
                 os.makedirs(os.path.dirname(new_probs_path))
             torch.save(probs, new_probs_path)
@@ -196,8 +230,8 @@ def main(args):
             best_test_accs.append(best_test)
 
             path = os.path.join("../converge_stats", args.dataset, 
-                                args.model if (args.model != "simple_sagn") else (args.model + "_" + args.weight_style),
-                                f"use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_seed_{args.seed + i}_stage_{stage}.csv")
+                                args.model if (args.weight_style == "attention") else (args.model + "_" + args.weight_style),
+                                f"use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_seed_{args.seed + i}_stage_{stage}.csv")
             if not os.path.exists(os.path.dirname(path)):
                 os.makedirs(os.path.dirname(path))
             # print(val_acc)
@@ -206,8 +240,8 @@ def main(args):
             df['val_acc'] = val_acc
             df.to_csv(path)
             fig_path = os.path.join("../converge_stats", args.dataset, 
-                        args.model if (args.model != "simple_sagn") else (args.model + "_" + args.weight_style),
-                        f"use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_seed_{args.seed + i}_stage_{stage}.png")
+                        args.model if (args.weight_style == "attention") else (args.model + "_" + args.weight_style),
+                        f"use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_seed_{args.seed + i}_stage_{stage}.png")
             sns.set()
             line_plt = sns.lineplot(data=df, x='epoch', y='val_acc')
             line = line_plt.get_figure()
@@ -215,8 +249,8 @@ def main(args):
             plt.close()
 
             path = os.path.join("../converge_stats", args.dataset, 
-                                args.model if (args.model != "simple_sagn") else (args.model + "_" + args.weight_style),
-                                f"val_loss_use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_seed_{args.seed + i}_stage_{stage}.csv")
+                                args.model if (args.weight_style == "attention") else (args.model + "_" + args.weight_style),
+                                f"val_loss_use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_seed_{args.seed + i}_stage_{stage}.csv")
             if not os.path.exists(os.path.dirname(path)):
                 os.makedirs(os.path.dirname(path))
             # print(val_loss)
@@ -225,23 +259,23 @@ def main(args):
             df['val_loss'] = val_loss
             df.to_csv(path)
             fig_path = os.path.join("../converge_stats", args.dataset, 
-                        args.model if (args.model != "simple_sagn") else (args.model + "_" + args.weight_style),
-                        f"val_loss_use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_seed_{args.seed + i}_stage_{stage}.png")
+                        args.model if (args.weight_style == "attention") else (args.model + "_" + args.weight_style),
+                        f"val_loss_use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_seed_{args.seed + i}_stage_{stage}.png")
             sns.set()
             line_plt = sns.lineplot(data=df, x='epoch', y='val_loss')
             line = line_plt.get_figure()
             line.savefig(fig_path)
             plt.close()
             
-            if args.model in ["sagn"] and (not args.avoid_features):
+            if (args.model in ["sagn", "plain_sagn"] and args.weight_style=="attention") and (not args.avoid_features):
                 path = os.path.join("../attn_weights", args.dataset, args.model,
-                    f"use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_seed_{args.seed + i}_stage_{stage}.csv")
+                    f"use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_seed_{args.seed + i}_stage_{stage}.csv")
                 if not os.path.exists(os.path.dirname(path)):
                     os.makedirs(os.path.dirname(path))
                 df = pd.DataFrame(data=attn_weights.cpu().numpy())
                 df.to_csv(path)
                 fig_path = os.path.join("../attn_weights", args.dataset, args.model,
-                    f"use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_seed_{args.seed + i}_stage_{stage}.png")
+                    f"use_labels_{args.use_labels}_use_feats_{not args.avoid_features}_K_{args.K}_label_K_{args.label_K}_seed_{args.seed + i}_stage_{stage}.png")
                 sns.set()
                 heatmap_plt = sns.heatmap(df)
                 heatmap = heatmap_plt.get_figure()
@@ -297,19 +331,34 @@ def define_parser():
     parser.add_argument("--avoid-features", action="store_true")
     parser.add_argument("--use-labels", action="store_true")
     parser.add_argument("--inductive", action="store_true")
+    parser.add_argument("--chunks", type=int, default=1)
     parser.add_argument("--use-norm", action='store_true')
+    parser.add_argument("--memory-efficient", action='store_true')
     parser.add_argument("--num-hidden", type=int, default=512)
     parser.add_argument("--K", type=int, default=3,
                         help="number of hops")
     parser.add_argument("--label-K", type=int, default=9,
                         help="number of label propagation hops")
+    parser.add_argument("--zero-inits", action="store_true", 
+                        help="Whether to initialize hop attention vector as zeros")
     parser.add_argument("--lr", type=float, default=0.002)
     parser.add_argument("--dataset", type=str, default="ppi")
+    parser.add_argument("--data_dir", type=str, default="/mnt/ssd/ssd/dataset")
     parser.add_argument("--model", type=str, default="sagn")
-    parser.add_argument("--weight-style", type=str, default="uniform")
+    parser.add_argument("--pretrain-model", type=str, default="ComplEx")
+    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--weight-style", type=str, default="attention")
+    parser.add_argument("--focal", type=str, default="first")
     parser.add_argument("--mag-emb", action="store_true")
+    parser.add_argument("--position-emb", action="store_true")
+    parser.add_argument("--label-residual", action="store_true")
     parser.add_argument("--dropout", type=float, default=0.5,
                         help="dropout on activation")
+    parser.add_argument("--input-drop", type=float, default=0.2,
+                        help="dropout on input features")
+    parser.add_argument("--attn-drop", type=float, default=0.4,
+                        help="dropout on hop-wise attention scores")
+    parser.add_argument("--label-drop", type=float, default=0.5)
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--aggr-gpu", type=int, default=0)
     parser.add_argument("--weight-decay", type=float, default=0)
@@ -318,16 +367,18 @@ def define_parser():
     parser.add_argument("--eval-batch-size", type=int, default=100000,
                         help="evaluation batch size")
     parser.add_argument("--mlp-layer", type=int, default=2,
-                        help="number of feed-forward layers")
+                        help="number of MLP layers")
+    parser.add_argument("--label-mlp-layer", type=int, default=4,
+                        help="number of label MLP layers")
     parser.add_argument("--num-heads", type=int, default=1)
-    parser.add_argument("--input-drop", type=float, default=0.2,
-                        help="dropout on input features")
-    parser.add_argument("--attn-drop", type=float, default=0.4,
-                        help="dropout on hop-wise attention scores")
-    parser.add_argument("--threshold", type=float, default=0.9,
+    parser.add_argument("--threshold", type=float, nargs="+", default=[0.9, 0.9],
                         help="threshold used to generate pseudo hard labels")
     parser.add_argument("--num-runs", type=int, default=10,
                         help="number of times to repeat the experiment")
+    parser.add_argument("--example-subsets-path", type=str, default="/home/scx/NARS/sample_relation_subsets/examples")
+    parser.add_argument("--sample-size", type=int, default=8)
+    parser.add_argument("--fixed-subsets", action="store_true")
+    parser.add_argument("--emb-path", type=str, default="/home/scx/NARS/")
     parser.add_argument("--probs_dir", type=str, default="../intermediate_outputs")
     return parser
 

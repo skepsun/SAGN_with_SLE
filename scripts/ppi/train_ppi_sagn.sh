@@ -11,7 +11,8 @@ python -u ../../src/sagn.py \
     --seed 0 \
     --dataset ppi \
     --inductive \
-    --threshold 0.9 \
+    --threshold 0.95 0.95 \
+    --zero-inits \
     --epoch-setting 2000 2000 2000\
     --eval-every 10 \
     --lr 0.001 \
@@ -21,8 +22,9 @@ python -u ../../src/sagn.py \
     --dropout 0.3 \
     --attn-drop 0.1 \
     --input-drop 0.0 \
+    --label-drop 0.3 \
     --K 2 \
-    --label-K 9 \
+    --label-K 12 \
     --use-labels \
     --weight-decay 3e-6 \
     --warmup-stage -1 \

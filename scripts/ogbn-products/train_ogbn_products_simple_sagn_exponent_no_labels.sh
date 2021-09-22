@@ -9,7 +9,7 @@ python -u ../../src/sagn.py \
     --dataset ogbn-products \
     --gpu $gpu \
     --aggr-gpu $gpu \
-    --model simple_sagn \
+    --model sagn \
     --seed 0 \
     --num-runs 10 \
     --threshold 0.9 \

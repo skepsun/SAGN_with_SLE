@@ -8,8 +8,9 @@ echo "gpu: $gpu"
 python -u ../../src/sagn.py \
     --dataset ogbn-products \
     --gpu $gpu \
+    --aggr-gpu -1 \
     --seed 0 \
-    --model  sign \
+    --model sign \
     --num-runs 10 \
     --epoch-setting 1000 200 200 \
     --lr 0.001 \

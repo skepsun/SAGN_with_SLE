@@ -11,16 +11,22 @@ python -u ../../src/sagn.py \
     --aggr-gpu -1 \
     --eval-every 1 \
     --model sagn \
+    --zero-inits \
+    --chunks 1 \
+    --memory-efficient \
+    --load-embs \
+    --load-label-emb \
     --seed 0 \
     --num-runs 10 \
-    --threshold 0.7 \
-    --epoch-setting 100 50 50 \
+    --threshold 0.5 \
+    --epoch-setting 100 100 100 100\
     --lr 0.001 \
     --batch-size 5000 \
     --num-hidden 1024 \
-    --dropout 0.4 \
-    --attn-drop 0.0 \
+    --dropout 0.5 \
+    --attn-drop 0. \
     --input-drop 0.0 \
+    --label-drop 0.5 \
     --K 3 \
     --label-K 9 \
     --use-labels \

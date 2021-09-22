@@ -8,20 +8,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def train(model, feats, label_emb, teacher_probs, labels, loss_fcn, optimizer, train_loader):
+def train(model, feats, label_emb, teacher_probs, labels, loss_fcn, optimizer, train_loader, args):
     model.train()
     device = labels.device
     for batch in train_loader:
-        
         if len(batch) == 1:
             continue
-        batch_feats = [x[batch].to(device) for x in feats] if isinstance(feats, list) else feats[batch].to(device)
+        if args.dataset == "ogbn-mag":
+            batch_feats = {rel_subset: [x[batch].to(device) for x in feat] for rel_subset, feat in feats.items()}
+        else:
+            batch_feats = [x[batch].to(device) for x in feats] if isinstance(feats, list) else feats[batch].to(device)
         if label_emb is not None:
             batch_label_emb = label_emb[batch].to(device)
         else:
             batch_label_emb = None
         
-        if type(model).__name__ in  ["SAGN", "PlainSAGN"]:
+        if (args.model in ["sagn", "plain_sagn"]) and (not args.avoid_features):
             out, _ = model(batch_feats, batch_label_emb)
         else:
             out = model(batch_feats, batch_label_emb)
@@ -36,7 +38,7 @@ def train(model, feats, label_emb, teacher_probs, labels, loss_fcn, optimizer, t
 
 
 def test(model, feats, label_emb, teacher_probs, labels, loss_fcn, val_loader, test_loader, evaluator,
-         train_nid, val_nid, test_nid):
+         train_nid, val_nid, test_nid, args):
     model.eval()
     num_nodes = labels.shape[0]
     device = labels.device
@@ -44,13 +46,16 @@ def test(model, feats, label_emb, teacher_probs, labels, loss_fcn, val_loader, t
     count_list = []
     preds = []
     for batch in val_loader:
-        batch_feats = [x[batch].to(device) for x in feats] if isinstance(feats, list) else feats[batch].to(device)
+        if args.dataset == "ogbn-mag":
+            batch_feats = {rel_subset: [x[batch].to(device) for x in feat] for rel_subset, feat in feats.items()}
+        else:
+            batch_feats = [x[batch].to(device) for x in feats] if isinstance(feats, list) else feats[batch].to(device)
         if label_emb is not None:
             batch_label_emb = label_emb[batch].to(device)
         else:
             batch_label_emb = None
         # We can get attention scores from SAGN
-        if type(model).__name__ in  ["SAGN", "PlainSAGN"]:
+        if (args.model in ["sagn", "plain_sagn"]) and (not args.avoid_features):
             out, _ = model(batch_feats, batch_label_emb)
         else:
             out = model(batch_feats, batch_label_emb)
@@ -61,12 +66,15 @@ def test(model, feats, label_emb, teacher_probs, labels, loss_fcn, val_loader, t
     val_loss = (loss_list * count_list).sum() / count_list.sum()
     start = time.time()
     for batch in test_loader:
-        batch_feats = [x[batch].to(device) for x in feats] if isinstance(feats, list) else feats[batch].to(device)
+        if args.dataset == "ogbn-mag":
+            batch_feats = {rel_subset: [x[batch].to(device) for x in feat] for rel_subset, feat in feats.items()}
+        else:
+            batch_feats = [x[batch].to(device) for x in feats] if isinstance(feats, list) else feats[batch].to(device)
         if label_emb is not None:
             batch_label_emb = label_emb[batch].to(device)
         else:
             batch_label_emb = None
-        if type(model).__name__ in  ["SAGN", "PlainSAGN"]:
+        if (args.model in ["sagn", "plain_sagn"]) and (not args.avoid_features):
             out, _ = model(batch_feats, batch_label_emb)
         else:
             out = model(batch_feats, batch_label_emb)

@@ -7,7 +7,7 @@ fi
 echo "gpu: $gpu"
 python -u ../../src/sagn.py \
     --gpu $gpu \
-    --aggr-gpu $gpu \
+    --aggr-gpu -1 \
     --model mlp \
     --dataset ogbn-products \
     --seed 0 \

@@ -10,6 +10,7 @@ python -u ../../src/sagn.py \
     --aggr-gpu $gpu\
     --model sagn \
     --dataset flickr \
+    --zero-inits \
     --inductive \
     --eval-every 1 \
     --epoch-setting 50 50 50 \
@@ -20,6 +21,7 @@ python -u ../../src/sagn.py \
     --dropout 0.7 \
     --attn-drop 0.0 \
     --input-drop 0.0 \
+    --label-drop 0.7 \
     --label-K 2 \
     --use-labels \
     --use-norm \
