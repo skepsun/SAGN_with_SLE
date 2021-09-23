@@ -85,11 +85,11 @@ def neighbor_average_features(g, feat, args, style="all", stats=True, memory_eff
     os.makedirs(tmp_dir, exist_ok=True)
     if style == "all":
         if memory_efficient:
-            torch.save(feat, os.path.join(tmp_dir, '0.pt'))
+            torch.save(feat[idx].clone(), os.path.join(tmp_dir, '0.pt'))
             res = []
         else:
-            res = [feat]
-        g.ndata['feat'] = feat
+            res = [feat[idx].clone()]
+        
             
         # print(g.ndata["feat"].shape)
         # print(norm.shape)
@@ -99,20 +99,21 @@ def neighbor_average_features(g, feat, args, style="all", stats=True, memory_eff
             shp = norm.shape + (1,) * (feat.dim() - 1)
             norm = torch.reshape(norm, shp)
         for hop in range(1, args.K + 1):
-            # g.ndata['pre_label_emb'] = g.ndata['label_emb']
+            g.ndata['f'] = feat
             if args.use_norm:
-                g.ndata['feat'] = g.ndata['feat'] * norm
-                
-                g.update_all(fn.copy_src(src=f'feat', out='msg'),
-                            fn.sum(msg='msg', out=f'feat'))
-                g.ndata['feat'] = g.ndata['feat'] * norm
+                g.ndata['f'] = g.ndata['f'] * norm
+                g.update_all(fn.copy_src(src=f'f', out='msg'),
+                            fn.sum(msg='msg', out=f'f'))
+                g.ndata['f'] = g.ndata['f'] * norm
             else:
-                g.update_all(fn.copy_src(src='feat', out='msg'),
-                            fn.mean(msg='msg', out='feat'))
+                g.update_all(fn.copy_src(src='f', out='msg'),
+                            fn.mean(msg='msg', out='f'))
+            feat = g.ndata.pop("f")
             if memory_efficient:
-                torch.save(g.ndata['feat'][idx], os.path.join(tmp_dir, f'{hop}.pt'))
+                torch.save(feat[idx].clone(), os.path.join(tmp_dir, f'{hop}.pt'))
             else:
-                res.append(g.ndata['feat'][idx])
+                res.append(feat[idx].clone())
+        
         del feat
         clear_memory(aggr_device)
         if memory_efficient:
@@ -175,7 +176,8 @@ def neighbor_average_features(g, feat, args, style="all", stats=True, memory_eff
             if stats:
                 print(f"hop {hop}: outer distance {outer_distance(feat_0, feat, train_mask):.4f}, inner distance {inner_distance(feat, train_mask):.4f}")
             
-        res = feat[idx]
+        res = feat[idx].clone()
+        del feat
         clear_memory(aggr_device)
 
         if args.dataset == "ogbn-mag":
